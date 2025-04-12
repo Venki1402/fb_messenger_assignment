@@ -203,31 +203,140 @@ class ConversationModel:
     # TODO: Implement the following methods
 
     @staticmethod
-    async def get_user_conversations(*args, **kwargs):
+    async def get_user_conversations(
+        user_id: int, page: int = 1, limit: int = 20
+    ) -> Dict[str, Any]:
         """
         Get conversations for a user with pagination.
 
-        Students should decide what parameters are needed and how to implement pagination.
+        Args:
+            user_id: ID of the user
+            page: Page number (starting from 1)
+            limit: Number of conversations per page
+
+        Returns:
+            Dictionary containing paginated conversations data
         """
-        # This is a stub - students will implement the actual logic
-        raise NotImplementedError("This method needs to be implemented")
+        query = """
+            SELECT user_id, conversation_id, other_user_id, last_message_at, last_message_content 
+            FROM conversations_by_user 
+            WHERE user_id = %s 
+            LIMIT %s
+        """
+
+        # Calculate fetch limit based on page number
+        fetch_limit = page * limit
+        params = (user_id, fetch_limit)
+
+        result = cassandra_client.execute(query, params)
+
+        # Get total count (for real applications, maintain a counter table)
+        count_query = """
+            SELECT COUNT(*) as count 
+            FROM conversations_by_user 
+            WHERE user_id = %s
+        """
+        count_result = cassandra_client.execute(count_query, (user_id,))
+        total = count_result[0]["count"] if count_result else 0
+
+        # Slice the results to get the current page
+        start_idx = (page - 1) * limit
+        end_idx = page * limit
+        data = result[start_idx:end_idx]
+
+        # Transform data to match expected response format
+        conversations = []
+        for row in data:
+            conversations.append(
+                {
+                    "id": row["conversation_id"],
+                    "user1_id": user_id,
+                    "user2_id": row["other_user_id"],
+                    "last_message_at": row["last_message_at"],
+                    "last_message_content": row["last_message_content"],
+                }
+            )
+
+        return {"total": total, "page": page, "limit": limit, "data": conversations}
 
     @staticmethod
-    async def get_conversation(*args, **kwargs):
+    async def get_conversation(conversation_id: int) -> Dict[str, Any]:
         """
         Get a conversation by ID.
 
-        Students should decide what parameters are needed and what data to return.
+        Args:
+            conversation_id: ID of the conversation
+
+        Returns:
+            Dictionary containing conversation data
         """
-        # This is a stub - students will implement the actual logic
-        raise NotImplementedError("This method needs to be implemented")
+        # Get the most recent message to get conversation details
+        query = """
+            SELECT conversation_id, sender_id, receiver_id, content, created_at
+            FROM messages_by_conversation 
+            WHERE conversation_id = %s 
+            LIMIT 1
+        """
+        params = (conversation_id,)
+
+        result = cassandra_client.execute(query, params)
+
+        if not result:
+            return None
+
+        message = result[0]
+
+        # Construct conversation object from most recent message
+        return {
+            "id": conversation_id,
+            "user1_id": message["sender_id"],
+            "user2_id": message["receiver_id"],
+            "last_message_at": message["created_at"],
+            "last_message_content": message["content"],
+        }
 
     @staticmethod
-    async def create_or_get_conversation(*args, **kwargs):
+    async def create_or_get_conversation(user1_id: int, user2_id: int) -> int:
         """
         Get an existing conversation between two users or create a new one.
 
-        Students should decide how to handle this operation efficiently.
+        Args:
+            user1_id: ID of the first user
+            user2_id: ID of the second user
+
+        Returns:
+            ID of the conversation
         """
-        # This is a stub - students will implement the actual logic
-        raise NotImplementedError("This method needs to be implemented")
+        # Ensure user1_id < user2_id for consistency in the lookup table
+        if user1_id > user2_id:
+            user1_id, user2_id = user2_id, user1_id
+
+        # Check if conversation exists
+        query = """
+            SELECT conversation_id
+            FROM conversation_lookup 
+            WHERE user1_id = %s AND user2_id = %s
+        """
+        params = (user1_id, user2_id)
+
+        result = cassandra_client.execute(query, params)
+
+        if result:
+            # Return existing conversation
+            return result[0]["conversation_id"]
+
+        # Create new conversation
+        conversation_id = int(
+            uuid.uuid4().int % (2**31 - 1)
+        )  # Convert UUID to 32-bit signed int
+
+        # Insert into conversation_lookup
+        query = """
+            INSERT INTO conversation_lookup 
+            (user1_id, user2_id, conversation_id) 
+            VALUES (%s, %s, %s)
+        """
+        params = (user1_id, user2_id, conversation_id)
+        cassandra_client.execute(query, params)
+
+        return conversation_id
